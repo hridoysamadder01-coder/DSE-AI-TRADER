@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>DSE AI Trader OS — Data Quality</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0b1020; --panel: #131a32; --fg: #e7ecff; --muted: #8c97c0;
+    --ok: #4ade80; --warn: #fbbf24; --err: #f87171; --accent: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 18px 24px; border-bottom: 1px solid #1f2848; display: flex; align-items: baseline; gap: 16px; }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: 0.4px; }
+  header .pill { padding: 2px 10px; border-radius: 999px; background: #1f2848; color: var(--muted); font-size: 12px; }
+  main { padding: 18px 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border-radius: 12px; padding: 16px 18px; }
+  .card h2 { margin: 0 0 8px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
+  .stat { font-size: 24px; font-weight: 600; }
+  .stat.ok { color: var(--ok); } .stat.warn { color: var(--warn); } .stat.err { color: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #1f2848; }
+  th { color: var(--muted); font-weight: 500; }
+  td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .badge { padding: 1px 8px; border-radius: 999px; font-size: 11px; }
+  .b-ok { background: rgba(74,222,128,.15); color: var(--ok); }
+  .b-warn { background: rgba(251,191,36,.15); color: var(--warn); }
+  .b-err { background: rgba(248,113,113,.15); color: var(--err); }
+  .b-info { background: rgba(96,165,250,.15); color: var(--accent); }
+  .row-buttons { display: flex; gap: 8px; margin-top: 10px; }
+  button { background: #1f2848; color: var(--fg); border: 0; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+  button:hover { background: #2a356a; }
+  .muted { color: var(--muted); }
+  footer { padding: 10px 24px 24px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DSE AI Trader OS — Admin</h1>
+  <span class="pill">Phase 1 — Data Foundation</span>
+  <a href="/" style="color: var(--accent); text-decoration: none; margin-left: auto;">← Back to Terminal</a>
+  <span id="hint" class="pill"></span>
+</header>
+<main>
+  <section class="card">
+    <h2>Last successful collector run</h2>
+    <div id="lastOk" class="stat muted">—</div>
+    <div id="lastOkDetail" class="muted"></div>
+  </section>
+  <section class="card">
+    <h2>Ticks captured (24h)</h2>
+    <div id="ticks24" class="stat ok">—</div>
+    <div id="lastTick" class="muted"></div>
+  </section>
+  <section class="card">
+    <h2>Quality issues (24h)</h2>
+    <div>
+      <span id="issErr"  class="stat err">0</span>
+      <span class="muted">err</span>
+      &nbsp;
+      <span id="issWarn" class="stat warn">0</span>
+      <span class="muted">warn</span>
+      &nbsp;
+      <span id="issInfo" class="stat">0</span>
+      <span class="muted">info</span>
+    </div>
+    <div class="row-buttons">
+      <button onclick="trigger('dse')">Run DSE</button>
+      <button onclick="trigger('cse')">Run CSE</button>
+      <button onclick="trigger('dse_index')">Run Index</button>
+      <button onclick="triggerCheck()">Quality check</button>
+    </div>
+  </section>
+
+  <section class="card" style="grid-column: 1 / -1;">
+    <h2>Recent collector runs</h2>
+    <table>
+      <thead>
+        <tr><th>Collector</th><th>Status</th><th>Started</th><th>Duration</th><th>In</th><th>Written</th><th>Rejected</th><th>Message</th></tr>
+      </thead>
+      <tbody id="runsBody"></tbody>
+    </table>
+  </section>
+
+  <section class="card" style="grid-column: 1 / -1;">
+    <h2>Recent quality issues</h2>
+    <table>
+      <thead>
+        <tr><th>Time</th><th>Severity</th><th>Collector</th><th>Symbol</th><th>Code</th><th>Detail</th></tr>
+      </thead>
+      <tbody id="issuesBody"></tbody>
+    </table>
+  </section>
+</main>
+<footer>Auto-refresh every 30s. <span id="ts" class="muted"></span></footer>
+<script>
+async function jget(url) { const r = await fetch(url); return r.json(); }
+async function jpost(url) { const r = await fetch(url, { method: "POST" }); return r.json(); }
+
+function fmtTime(s) { if (!s) return ""; const d = new Date(s); return d.toLocaleString(); }
+function severityBadge(s) {
+  const cls = s === "error" ? "b-err" : s === "warn" ? "b-warn" : s === "info" ? "b-info" : "b-ok";
+  return `<span class="badge ${cls}">${s}</span>`;
+}
+function statusBadge(s) {
+  const cls = s === "ok" ? "b-ok" : s === "failed" ? "b-err" : "b-info";
+  return `<span class="badge ${cls}">${s}</span>`;
+}
+
+async function refresh() {
+  try {
+    const [rep, runs, issues] = await Promise.all([
+      jget("/api/quality/report"),
+      jget("/api/quality/runs?limit=20"),
+      jget("/api/quality/issues?hours=24"),
+    ]);
+    const lastOk = rep.last_ok_run;
+    document.getElementById("lastOk").textContent = lastOk ? lastOk.collector : "none";
+    document.getElementById("lastOk").className = "stat " + (lastOk ? "ok" : "err");
+    document.getElementById("lastOkDetail").textContent =
+      lastOk ? `${fmtTime(lastOk.finished_at)} • ${lastOk.rows_written} rows` : "no successful runs yet";
+    document.getElementById("ticks24").textContent = (rep.ticks_24h ?? 0).toLocaleString();
+    document.getElementById("lastTick").textContent = rep.last_tick_at ? "last: " + fmtTime(rep.last_tick_at) : "no ticks yet";
+    const sevs = rep.issues_24h || {};
+    document.getElementById("issErr").textContent = sevs.error || 0;
+    document.getElementById("issWarn").textContent = sevs.warn || 0;
+    document.getElementById("issInfo").textContent = sevs.info || 0;
+
+    document.getElementById("runsBody").innerHTML = runs.map(r => `
+      <tr>
+        <td>${r.collector}</td>
+        <td>${statusBadge(r.status)}</td>
+        <td class="mono">${fmtTime(r.started_at)}</td>
+        <td class="mono">${r.duration_ms != null ? r.duration_ms + " ms" : ""}</td>
+        <td class="mono">${r.rows_in}</td>
+        <td class="mono">${r.rows_written}</td>
+        <td class="mono">${r.rows_rejected}</td>
+        <td class="muted">${r.message || ""}</td>
+      </tr>
+    `).join("");
+
+    document.getElementById("issuesBody").innerHTML = issues.slice(0, 50).map(i => `
+      <tr>
+        <td class="mono">${fmtTime(i.created_at)}</td>
+        <td>${severityBadge(i.severity)}</td>
+        <td>${i.collector}</td>
+        <td class="mono">${i.symbol || ""}</td>
+        <td class="mono">${i.code}</td>
+        <td class="muted">${i.detail || ""}</td>
+      </tr>
+    `).join("");
+
+    document.getElementById("ts").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("hint").textContent = "fetch failed: " + e;
+  }
+}
+async function trigger(name) {
+  document.getElementById("hint").textContent = "running " + name + "…";
+  const r = await jpost("/api/admin/collect/" + name);
+  document.getElementById("hint").textContent = `${name}: ${r.rows_written} written, ${r.rows_rejected} rejected`;
+  await refresh();
+}
+async function triggerCheck() {
+  document.getElementById("hint").textContent = "running quality check…";
+  await jpost("/api/quality/check");
+  document.getElementById("hint").textContent = "quality check done";
+  await refresh();
+}
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
