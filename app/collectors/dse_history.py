@@ -104,6 +104,23 @@ def fetch_symbol_history(symbol: str, start: date, end: date) -> list[dict]:
     return _parse_archive_html(html, symbol)
 
 
+def _sane_ohlc(
+    open_: float | None, high: float | None, low: float | None, close: float
+) -> tuple[float, float, float]:
+    """Repair OHLC so a candle never has a fake wick.
+
+    DSE's archive returns 0 (not blank) for open/high/low on no-trade / special
+    days, which otherwise draws a candle plunging to zero and wrecks the price
+    scale. Treat any non-positive value as missing and derive it from the close,
+    then clamp high/low around {open, close}."""
+    o = open_ if (open_ and open_ > 0) else close
+    h = high if (high and high > 0) else None
+    l = low if (low and low > 0) else None
+    h = max(x for x in (h, o, close) if x is not None)
+    l = min(x for x in (l, o, close) if x is not None)
+    return o, h, l
+
+
 def _upsert_daily(s: Session, company_id: int, rows: list[dict]) -> tuple[int, int]:
     """Returns (inserted, updated)."""
     inserted = updated = 0
@@ -133,14 +150,15 @@ def _upsert_daily(s: Session, company_id: int, rows: list[dict]) -> tuple[int, i
         if r["close"] is None and r["ltp"] is None:
             continue
         close = r["close"] if r["close"] is not None else r["ltp"]
+        o, h, l = _sane_ohlc(r["open"], r["high"], r["low"], close)
         existing_row = by_date.get(r["trade_date"])
         if existing_row:
             # Only overwrite if source is from this collector (don't trample today's
             # intraday rollup if the archive has incomplete data for today).
             if existing_row.source == "dse_history":
-                existing_row.open = r["open"]
-                existing_row.high = r["high"]
-                existing_row.low = r["low"]
+                existing_row.open = o
+                existing_row.high = h
+                existing_row.low = l
                 existing_row.close = close
                 existing_row.ycp = r["ycp"]
                 existing_row.volume = r["volume"]
@@ -151,9 +169,9 @@ def _upsert_daily(s: Session, company_id: int, rows: list[dict]) -> tuple[int, i
             s.add(PriceDaily(
                 company_id=company_id,
                 trade_date=r["trade_date"],
-                open=r["open"],
-                high=r["high"],
-                low=r["low"],
+                open=o,
+                high=h,
+                low=l,
                 close=close,
                 ycp=r["ycp"],
                 volume=r["volume"],
