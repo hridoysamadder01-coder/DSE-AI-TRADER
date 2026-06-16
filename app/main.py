@@ -39,6 +39,28 @@ async def lifespan(app: FastAPI):
         run_eod_rollup()
     except Exception as e:
         logger.warning(f"EOD rollup at boot failed: {e}")
+    # Backfill index history (DSEX/DSES/DS30) in the background so the chart has
+    # ~20 years of data even on an ephemeral disk. Idempotent: skips if already
+    # populated. Runs off-thread so it never delays readiness / health checks.
+    try:
+        import threading
+
+        from .collectors.index_history import (
+            backfill_index_history,
+            ensure_index_companies,
+        )
+
+        ensure_index_companies()
+
+        def _boot_index_backfill() -> None:
+            try:
+                backfill_index_history(duration_months=240, only_if_sparse=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"index backfill (startup) failed: {e}")
+
+        threading.Thread(target=_boot_index_backfill, daemon=True).start()
+    except Exception as e:
+        logger.warning(f"index backfill bootstrap failed: {e}")
     global _scheduler
     if settings.app_env != "test":
         _scheduler = build_scheduler()

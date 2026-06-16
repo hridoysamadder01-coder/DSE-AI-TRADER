@@ -144,3 +144,16 @@ def run_collector_now(which: str):
         "rows_written": res.rows_written,
         "rows_rejected": res.rows_rejected,
     }
+
+
+@router.post("/admin/backfill/index")
+def backfill_index_now(
+    duration_months: int = Query(240, ge=1, le=300),
+    only_if_sparse: bool = Query(False),
+):
+    """Backfill DSEX/DSES/DS30 daily history into price_daily (pseudo-companies)."""
+    from ..collectors.index_history import backfill_index_history
+
+    return backfill_index_history(
+        duration_months=duration_months, only_if_sparse=only_if_sparse
+    )

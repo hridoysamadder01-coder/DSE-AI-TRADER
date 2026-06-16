@@ -13,8 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
+from ..collectors.index_history import is_index_symbol
 from ..db import get_db
-from ..models import Company, PriceDaily, PriceTick
+from ..models import Company, MarketSnapshot, PriceDaily, PriceTick
 
 router = APIRouter(prefix="/api/chart", tags=["chart"])
 
@@ -87,11 +88,82 @@ def _intraday_bars(db: Session, company_id: int, hours: int, resolution_min: int
     return [bars[k] for k in sorted(bars)]
 
 
+def _index_intraday_bars(
+    db: Session, index_name: str, hours: int, resolution_min: int
+) -> list[dict]:
+    """Aggregate market_snapshots (one value per poll) into OHLC buckets.
+
+    Indices have no per-tick volume, so bars carry price only. History only
+    accumulates going forward (from the 5-min index poller)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    rows = (
+        db.execute(
+            select(MarketSnapshot)
+            .where(MarketSnapshot.index_name == index_name)
+            .where(MarketSnapshot.captured_at >= cutoff)
+            .order_by(MarketSnapshot.captured_at)
+        )
+        .scalars()
+        .all()
+    )
+    bucket_sec = resolution_min * 60
+    bars: dict[int, dict] = {}
+    for r in rows:
+        if r.value is None:
+            continue
+        ts = int(
+            r.captured_at.replace(tzinfo=timezone.utc).timestamp()
+            if r.captured_at.tzinfo is None
+            else r.captured_at.timestamp()
+        )
+        bkey = ts - (ts % bucket_sec)
+        b = bars.get(bkey)
+        if b is None:
+            bars[bkey] = {
+                "time": bkey, "open": r.value, "high": r.value,
+                "low": r.value, "close": r.value, "volume": 0, "value_bdt": 0.0,
+            }
+        else:
+            b["high"] = max(b["high"], r.value)
+            b["low"] = min(b["low"], r.value)
+            b["close"] = r.value
+    return [bars[k] for k in sorted(bars)]
+
+
+def _append_live_index_bar(db: Session, index_name: str, bars: list[dict]) -> list[dict]:
+    """Make today's daily index bar move live off the latest snapshot value."""
+    snap = db.execute(
+        select(MarketSnapshot)
+        .where(MarketSnapshot.index_name == index_name)
+        .order_by(desc(MarketSnapshot.captured_at))
+        .limit(1)
+    ).scalar_one_or_none()
+    if snap is None or snap.value is None:
+        return bars
+    cap = snap.captured_at
+    cap = cap.replace(tzinfo=timezone.utc) if cap.tzinfo is None else cap
+    day_ts = int(datetime(cap.year, cap.month, cap.day, tzinfo=timezone.utc).timestamp())
+    v = snap.value
+    if bars and bars[-1]["time"] >= day_ts:
+        last = bars[-1]
+        last["high"] = max(last["high"], v)
+        last["low"] = min(last["low"], v)
+        last["close"] = v
+    else:
+        prev_close = bars[-1]["close"] if bars else v
+        bars.append({
+            "time": day_ts, "open": prev_close,
+            "high": max(prev_close, v), "low": min(prev_close, v),
+            "close": v, "volume": 0, "value_bdt": 0.0,
+        })
+    return bars
+
+
 @router.get("/{symbol}/candles")
 def candles(
     symbol: str,
     resolution_min: int = Query(5, ge=1, le=1440),
-    hours: int = Query(24, ge=1, le=26280),     # up to 3 years
+    hours: int = Query(24, ge=1, le=200000),     # up to ~22 years (index history)
     db: Session = Depends(get_db),
 ):
     company = db.execute(
@@ -100,11 +172,20 @@ def candles(
     if not company:
         raise HTTPException(404, "symbol not found")
 
-    # For long timeframes, prefer daily OHLCV (EOD rollup).
+    sym = company.symbol
+    is_index = is_index_symbol(sym)
+
     if resolution_min >= 240:
+        # Long timeframes: daily OHLCV. For an index that's the backfilled
+        # history; append a live-moving bar for today off the latest snapshot.
         days = max(7, hours // 24)
         bars = _daily_bars(db, company.id, days)
+        if is_index:
+            bars = _append_live_index_bar(db, sym, bars)
         source = "price_daily"
+    elif is_index:
+        bars = _index_intraday_bars(db, sym, hours, resolution_min)
+        source = "market_snapshots"
     else:
         bars = _intraday_bars(db, company.id, hours, resolution_min)
         source = "price_ticks"
@@ -113,6 +194,7 @@ def candles(
         "symbol": company.symbol,
         "exchange": company.exchange,
         "resolution_min": resolution_min,
+        "is_index": is_index,
         "source": source,
         "bars": bars,
     }

@@ -372,7 +372,8 @@ body.dragging-dock,body.dragging-dock *{cursor:ns-resize!important;user-select:n
           <button class="tf-btn" data-res="15"   data-h="168"  >15m</button>
           <button class="tf-btn" data-res="60"   data-h="720"  >1H</button>
           <button class="tf-btn" data-res="240"  data-h="4320" >4H</button>
-          <button class="tf-btn active" data-res="1440" data-h="17520">1D</button>
+          <button class="tf-btn" data-res="1440" data-h="17520">1D</button>
+          <button class="tf-btn active" data-res="1440" data-h="180000">MAX</button>
           <button onclick="openTvFullPage()" title="Open on tradingview.com (full-screen, your TV login)">TV ↗</button>
           <button class="detach-btn" onclick="detachChart()" title="Pop chart into its own window">⤢</button>
           <button onclick="toggleFullscreen()" title="Fullscreen">⛶</button>
@@ -441,10 +442,10 @@ body.dragging-dock,body.dragging-dock *{cursor:ns-resize!important;user-select:n
    ======================================================================== */
 const LS={wl:"dse_watchlist",pf:"dse_portfolio",sym:"dse_current_symbol",ind:"dse_indicators",wlClosed:"dse_wl_closed",drawings:"dse_drawings_v2"};
 const state={
-  watchlist:load(LS.wl,["GP","BATBC","SQURPHARMA","ROBI","BEXIMCO"]),
+  watchlist:load(LS.wl,["DSEX","DS30","DSES","GP","SQURPHARMA","BEXIMCO"]),
   portfolio:load(LS.pf,[]),
-  currentSymbol:load(LS.sym,"GP"),
-  resolution:1440,hours:17520,    // default to 1D / ~2 years (full backfilled history)
+  currentSymbol:load(LS.sym,"DSEX"),
+  resolution:1440,hours:180000,    // default to full daily history (indices: ~13y)
   prices:{},
   indicators:load(LS.ind,{ema:true,sma:true,vwap:true,bb:true,rsi:true,macd:true,ai:true}),
   wlCollapsed:load(LS.wlClosed,false),
