@@ -39,28 +39,53 @@ async def lifespan(app: FastAPI):
         run_eod_rollup()
     except Exception as e:
         logger.warning(f"EOD rollup at boot failed: {e}")
-    # Backfill index history (DSEX/DSES/DS30) in the background so the chart has
-    # ~20 years of data even on an ephemeral disk. Idempotent: skips if already
-    # populated. Runs off-thread so it never delays readiness / health checks.
+    # Warm up after a cold/ephemeral start so the app is usable immediately,
+    # even outside market hours and before the scheduler's first tick. Runs in a
+    # background thread so it never delays readiness / health checks:
+    #   1. Seed the DSE/CSE company registry + last prices (so any stock chart
+    #      can lazy-backfill on demand at any time, not just during market hours).
+    #   2. Backfill DSEX/DSES/DS30 index history (~13y) for instant index charts.
+    # Both are guarded to only do real work when the (ephemeral) DB is empty.
     try:
         import threading
 
+        from sqlalchemy import func, select
+
+        from .collectors.cse import CSELatestPriceCollector
+        from .collectors.dse import DSELatestPriceCollector
         from .collectors.index_history import (
             backfill_index_history,
             ensure_index_companies,
         )
+        from .db import session_scope
+        from .models import Company
 
         ensure_index_companies()
 
-        def _boot_index_backfill() -> None:
+        def _boot_warmup() -> None:
+            try:
+                with session_scope() as s:
+                    n_stocks = s.execute(
+                        select(func.count(Company.id)).where(
+                            Company.exchange.in_(("DSE", "CSE"))
+                        )
+                    ).scalar_one()
+                if n_stocks < 50:  # fresh disk — seed registry + last prices
+                    for coll in (DSELatestPriceCollector, CSELatestPriceCollector):
+                        try:
+                            coll().run()
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning(f"startup {coll.__name__} failed: {e}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"startup registry seed failed: {e}")
             try:
                 backfill_index_history(duration_months=240, only_if_sparse=True)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"index backfill (startup) failed: {e}")
 
-        threading.Thread(target=_boot_index_backfill, daemon=True).start()
+        threading.Thread(target=_boot_warmup, daemon=True).start()
     except Exception as e:
-        logger.warning(f"index backfill bootstrap failed: {e}")
+        logger.warning(f"startup warmup bootstrap failed: {e}")
     global _scheduler
     if settings.app_env != "test":
         _scheduler = build_scheduler()
