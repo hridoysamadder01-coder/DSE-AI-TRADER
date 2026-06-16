@@ -36,6 +36,35 @@ class FetchError(RuntimeError):
     pass
 
 
+def _is_cert_error(exc: BaseException) -> bool:
+    """True if exc (or its cause chain) is an SSL certificate-verification failure."""
+    seen = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, ssl.SSLCertVerificationError):
+            return True
+        text = str(cur).lower()
+        if "certificate verify failed" in text or "certificate_verify_failed" in text:
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _do_get(url: str, headers: dict, timeout_s: int, verify) -> str:
+    with httpx.Client(
+        timeout=timeout_s,
+        follow_redirects=True,
+        headers=headers,
+        verify=verify,
+    ) as client:
+        r = client.get(url)
+        if r.status_code >= 500:
+            raise FetchError(f"upstream {r.status_code} for {url}")
+        r.raise_for_status()
+        return r.text
+
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(3),
@@ -43,7 +72,15 @@ class FetchError(RuntimeError):
     retry=retry_if_exception_type((httpx.HTTPError, FetchError)),
 )
 def fetch_html(url: str, *, timeout: int | None = None) -> str:
-    """GET a page and return text. Polite UA, exponential backoff, 3 attempts."""
+    """GET a page and return text. Polite UA, exponential backoff, 3 attempts.
+
+    DSE/CSE serve a broken TLS chain (the leaf's real intermediate is missing,
+    a mismatched Sectigo root is sent instead). Browsers repair this via AIA
+    fetching; Python's ssl cannot, so verification raises "unable to get local
+    issuer certificate". These are public, credential-free data pages, so when —
+    and only when — verification fails on a cert error, we retry the same GET
+    with verification disabled. Every other failure mode keeps full verification.
+    """
     settings = get_settings()
     headers = {
         "User-Agent": settings.http_user_agent,
@@ -52,14 +89,13 @@ def fetch_html(url: str, *, timeout: int | None = None) -> str:
     }
     timeout_s = timeout or settings.http_timeout_seconds
     logger.debug(f"GET {url}")
-    with httpx.Client(
-        timeout=timeout_s,
-        follow_redirects=True,
-        headers=headers,
-        verify=_SSL_CTX,
-    ) as client:
-        r = client.get(url)
-        if r.status_code >= 500:
-            raise FetchError(f"upstream {r.status_code} for {url}")
-        r.raise_for_status()
-        return r.text
+    try:
+        return _do_get(url, headers, timeout_s, _SSL_CTX)
+    except Exception as e:
+        if _is_cert_error(e):
+            logger.warning(
+                f"TLS verification failed for {url} (broken upstream chain); "
+                f"retrying without verification"
+            )
+            return _do_get(url, headers, timeout_s, False)
+        raise

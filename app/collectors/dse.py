@@ -78,7 +78,10 @@ class DSELatestPriceCollector(BaseCollector):
         idx_ltp = col("ltp")
         idx_high = col("high")
         idx_low = col("low")
-        idx_close = col("close") or col("ycp")
+        # ycp = yesterday's closing price (DSE column "YCP*"), the basis for the
+        # CHANGE column. Must NOT be confused with "CLOSEP*" (today's close),
+        # which is 0 intraday and would zero out every change calculation.
+        idx_ycp = col("ycp") or col("close")
         idx_trades = col("trade")
         idx_volume = col("volume")
         idx_value = col("value")  # value in million Tk
@@ -105,7 +108,7 @@ class DSELatestPriceCollector(BaseCollector):
             ltp = _to_float(cell(idx_ltp))
             high = _to_float(cell(idx_high))
             low = _to_float(cell(idx_low))
-            ycp = _to_float(cell(idx_close))
+            ycp = _to_float(cell(idx_ycp))
             trades = _to_int(cell(idx_trades))
             volume = _to_int(cell(idx_volume))
             value_mn = _to_float(cell(idx_value))
