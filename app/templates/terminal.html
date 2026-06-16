@@ -381,13 +381,14 @@ body.dragging-dock,body.dragging-dock *{cursor:ns-resize!important;user-select:n
           <span style="width:6px"></span>
           <span class="draw-line" id="btnLayout" onclick="toggleLayoutMenu(event)" title="Save / load chart layouts">⊞ Layout</span>
           <span style="width:6px"></span>
-          <button class="tf-btn" data-res="1"    data-h="24"   >1m</button>
-          <button class="tf-btn" data-res="5"    data-h="72"   >5m</button>
-          <button class="tf-btn" data-res="15"   data-h="168"  >15m</button>
-          <button class="tf-btn" data-res="60"   data-h="720"  >1H</button>
-          <button class="tf-btn" data-res="240"  data-h="4320" >4H</button>
-          <button class="tf-btn" data-res="1440" data-h="17520">1D</button>
-          <button class="tf-btn active" data-res="1440" data-h="180000">MAX</button>
+          <button class="tf-btn" data-res="1"     data-h="24"    >1m</button>
+          <button class="tf-btn" data-res="5"     data-h="72"    >5m</button>
+          <button class="tf-btn" data-res="15"    data-h="168"   >15m</button>
+          <button class="tf-btn" data-res="60"    data-h="720"   >1H</button>
+          <button class="tf-btn" data-res="240"   data-h="4320"  >4H</button>
+          <button class="tf-btn active" data-res="1440"  data-h="180000">1D</button>
+          <button class="tf-btn" data-res="10080" data-h="180000">1W</button>
+          <button class="tf-btn" data-res="43200" data-h="180000">1M</button>
           <button onclick="openTvFullPage()" title="Open on tradingview.com (full-screen, your TV login)">TV ↗</button>
           <button class="detach-btn" onclick="detachChart()" title="Pop chart into its own window">⤢</button>
           <button onclick="toggleFullscreen()" title="Fullscreen">⛶</button>
@@ -684,18 +685,55 @@ function rsi(values,period=14){const out=new Array(values.length).fill(null);if(
 function macd(values,fast=12,slow=26,signal=9){const ef=ema(values,fast),es=ema(values,slow);const line=ef.map((v,i)=>(v==null||es[i]==null)?null:v-es[i]);const filled=line.filter(x=>x!=null);const sig=ema(filled,signal);let j=0;const sigOut=line.map(v=>v==null?null:sig[j++]??null);const hist=line.map((v,i)=>(v==null||sigOut[i]==null)?null:v-sigOut[i]);return {line,signal:sigOut,hist}}
 function bb(values,period=20,stdMult=2){const m=sma(values,period);const up=[],lo=[];for(let i=0;i<values.length;i++){if(m[i]==null){up.push(null);lo.push(null);continue}let s=0,n=0;for(let j=Math.max(0,i-period+1);j<=i;j++){const d=values[j]-m[i];s+=d*d;n++}const std=Math.sqrt(s/n);up.push(m[i]+stdMult*std);lo.push(m[i]-stdMult*std)}return {middle:m,upper:up,lower:lo}}
 
+/* Aggregate daily bars into weekly/monthly OHLCV (client-side, like TradingView's
+   W/M views). `mode` = "week" (ISO Mon-anchored) or "month". */
+function aggregateBars(bars,mode){
+  if(!bars.length)return bars;
+  const keyOf=t=>{
+    const d=new Date(t*1000);
+    if(mode==="month")return d.getUTCFullYear()*12+d.getUTCMonth();
+    const day=(d.getUTCDay()+6)%7;            // Mon=0
+    const monday=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()-day)/1000;
+    return monday;
+  };
+  const out=[];let cur=null,curKey=null;
+  for(const b of bars){
+    const k=keyOf(b.time);
+    if(k!==curKey){
+      if(cur)out.push(cur);
+      cur={time:b.time,open:b.open,high:b.high,low:b.low,close:b.close,volume:b.volume||0,value_bdt:b.value_bdt||0};
+      curKey=k;
+    }else{
+      cur.high=Math.max(cur.high,b.high);
+      cur.low=Math.min(cur.low,b.low);
+      cur.close=b.close;
+      cur.volume+=b.volume||0;
+      cur.value_bdt+=b.value_bdt||0;
+    }
+  }
+  if(cur)out.push(cur);
+  return out;
+}
+
 /* ---------- chart load ---------- */
 async function loadChartBuiltIn(symbol){
   document.getElementById("chartSym").textContent=symbol;
   try{chartMain.applyOptions({watermark:{text:symbol}});}catch{}
   try{
-    const data=await jget(`/api/chart/${encodeURIComponent(symbol)}/candles?resolution_min=${state.resolution}&hours=${state.hours}`);
-    const bars=data.bars||[];
+    // Weekly/Monthly are daily bars aggregated client-side (DSE only serves daily).
+    const aggMode=state.resolution>=43200?"month":state.resolution>=10080?"week":null;
+    const apiRes=aggMode?1440:state.resolution;
+    const data=await jget(`/api/chart/${encodeURIComponent(symbol)}/candles?resolution_min=${apiRes}&hours=${state.hours}`);
+    let bars=data.bars||[];
+    if(aggMode)bars=aggregateBars(bars,aggMode);
     if(!bars.length){
       [candleSeries,volumeSeries,volumeMaSeries,emaSeries,smaSeries,ema200Series,vwapSeries,bbUpper,bbMiddle,bbLower,rsiSeries,macdLineSeries,macdSignalSeries,macdHistSeries].forEach(s=>{try{s.setData([])}catch{}});
       document.getElementById("chartPrice").textContent="—";
-      document.getElementById("chartDelta").textContent="no bars at this timeframe";
-      document.getElementById("chartMeta").textContent=`DSE market closed → only snapshot ticks. Try the 1m or 5m timeframe.`;
+      const intraday=state.resolution<240;
+      document.getElementById("chartDelta").textContent=intraday?"no intraday history yet":"no bars at this timeframe";
+      document.getElementById("chartMeta").textContent=intraday
+        ?`DSE doesn't publish past intraday data — it builds live during market hours. Use 1D / 1W / 1M for full history.`
+        :`No data at this timeframe — try 1D.`;
       const lg = document.getElementById("chartLegend"); if (lg) lg.innerHTML = "";
       clearAiOverlays();
       return;
@@ -747,7 +785,8 @@ async function loadChartBuiltIn(symbol){
     const cp=state.intel?.price?.change_pct;
     if(cp!=null){dEl.textContent=`${fmt(state.intel.price.change)} (${pctText(cp)})`;dEl.className="delta "+pctClass(cp)}
     else {dEl.textContent="—";dEl.className="delta flat"}
-    document.getElementById("chartMeta").textContent=`${bars.length} bars • ${state.resolution}m`;
+    const tfLabel=state.resolution>=43200?"1M":state.resolution>=10080?"1W":state.resolution>=1440?"1D":state.resolution>=240?"4H":`${state.resolution}m`;
+    document.getElementById("chartMeta").textContent=`${bars.length} bars • ${tfLabel}`;
     const dd = document.getElementById("dataDepth");
     if (dd) dd.textContent = `• ${bars.length} bars (${state.intel?.tick_count_24h ?? '—'} ticks/24h)`;
 
