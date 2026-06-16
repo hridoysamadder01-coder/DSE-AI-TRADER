@@ -44,6 +44,18 @@ body{
 .search .kbd{color:var(--muted);font-family:var(--mono);font-size:11px}
 .search-results{position:absolute;top:32px;right:0;background:var(--panel);border:1px solid var(--line);border-radius:4px;width:280px;max-height:320px;overflow:auto;z-index:100;box-shadow:0 8px 24px rgba(0,0,0,.4);display:none}
 .search-results.open{display:block}
+.layout-menu{position:fixed;display:none;z-index:200;background:var(--panel);border:1px solid var(--line);border-radius:6px;width:230px;box-shadow:0 10px 30px rgba(0,0,0,.5);padding:8px;font-family:var(--mono,monospace)}
+.layout-head{font-size:10px;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.layout-save{display:flex;gap:5px;margin-bottom:7px}
+.layout-save input{flex:1;background:var(--bg,#0a0e23);border:1px solid var(--line);border-radius:4px;color:var(--fg,#cfd8ff);padding:4px 6px;font-size:11px;outline:none}
+.layout-save button{background:var(--accent,#f7a300);color:#0a0e23;border:0;border-radius:4px;padding:4px 8px;font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap}
+.layout-list{max-height:180px;overflow:auto}
+.layout-row{display:flex;justify-content:space-between;align-items:center;padding:5px 7px;border-radius:4px;cursor:pointer;font-size:12px;color:var(--fg,#cfd8ff)}
+.layout-row:hover{background:rgba(95,166,255,.12)}
+.layout-del{color:var(--muted);font-size:11px;padding:0 4px}
+.layout-del:hover{color:#ff5560}
+.layout-empty{color:var(--muted);font-size:11px;padding:6px 7px}
+.layout-tip{color:var(--muted);font-size:10px;margin-top:6px;line-height:1.4}
 .sr-row{padding:6px 10px;display:flex;gap:8px;cursor:pointer;font-family:var(--mono);font-size:12px}
 .sr-row:hover{background:#14204a}
 .sr-row .ex{color:var(--muted);font-size:10px}
@@ -366,6 +378,8 @@ body.dragging-dock,body.dragging-dock *{cursor:ns-resize!important;user-select:n
           <span class="draw-line" id="drawHorz"  onclick="setDrawMode('horizontal')">— Level</span>
           <span class="draw-line" id="drawFib"   onclick="setDrawMode('fib')">Φ Fib</span>
           <span class="draw-line" onclick="clearDrawings()">✕</span>
+          <span style="width:6px"></span>
+          <span class="draw-line" id="btnLayout" onclick="toggleLayoutMenu(event)" title="Save / load chart layouts">⊞ Layout</span>
           <span style="width:6px"></span>
           <button class="tf-btn" data-res="1"    data-h="24"   >1m</button>
           <button class="tf-btn" data-res="5"    data-h="72"   >5m</button>
@@ -766,6 +780,55 @@ function reflectIndicators(){
     if(el)el.classList.toggle("on",state.indicators[k]);
   }
 }
+
+/* ---------- multiple chart layouts (named templates) ---------- */
+const LS_LAYOUTS="dse_layouts_v1";
+function getLayouts(){try{return JSON.parse(localStorage.getItem(LS_LAYOUTS)||"{}")}catch{return {}}}
+function setLayouts(o){localStorage.setItem(LS_LAYOUTS,JSON.stringify(o))}
+function saveLayout(){
+  const name=(document.getElementById("layoutName").value||"").trim();
+  if(!name){return}
+  const all=getLayouts();
+  all[name]={indicators:{...state.indicators},res:state.resolution,hours:state.hours};
+  setLayouts(all);
+  document.getElementById("layoutName").value="";
+  renderLayoutMenu();
+}
+function applyLayout(name){
+  const all=getLayouts();const L=all[name];if(!L)return;
+  state.indicators={...state.indicators,...L.indicators};
+  save(LS.ind,state.indicators);reflectIndicators();
+  if(L.res){state.resolution=L.res;state.hours=L.hours||state.hours;
+    document.querySelectorAll(".tf-btn").forEach(b=>b.classList.toggle("active",
+      parseInt(b.dataset.res)===L.res&&parseInt(b.dataset.h)===L.hours));}
+  loadChart(state.currentSymbol);
+  closeLayoutMenu();
+}
+function deleteLayout(name,ev){
+  if(ev)ev.stopPropagation();
+  const all=getLayouts();delete all[name];setLayouts(all);renderLayoutMenu();
+}
+function renderLayoutMenu(){
+  const box=document.getElementById("layoutList");if(!box)return;
+  const all=getLayouts();const names=Object.keys(all);
+  box.innerHTML=names.length?names.map(n=>
+    `<div class="layout-row" onclick="applyLayout('${n.replace(/'/g,"\\'")}')">
+       <span>${n}</span><span class="layout-del" onclick="deleteLayout('${n.replace(/'/g,"\\'")}',event)">✕</span>
+     </div>`).join(""):`<div class="layout-empty">no saved layouts yet</div>`;
+}
+function toggleLayoutMenu(ev){
+  if(ev)ev.stopPropagation();
+  const m=document.getElementById("layoutMenu");
+  if(!m)return;
+  if(m.style.display==="block"){m.style.display="none";return}
+  const btn=document.getElementById("btnLayout");const r=btn.getBoundingClientRect();
+  m.style.top=(r.bottom+4)+"px";m.style.left=Math.max(8,r.left-60)+"px";
+  m.style.display="block";renderLayoutMenu();
+}
+function closeLayoutMenu(){const m=document.getElementById("layoutMenu");if(m)m.style.display="none"}
+document.addEventListener("click",e=>{
+  if(!e.target.closest("#layoutMenu")&&!e.target.closest("#btnLayout"))closeLayoutMenu();
+});
 
 /* ---------- timeframe ---------- */
 document.querySelectorAll(".tf-btn").forEach(b=>b.addEventListener("click",()=>{
@@ -1654,5 +1717,15 @@ bootstrap();
 setInterval(refreshAll,30000);
 setInterval(pollAlerts,60000);
 </script>
+<div id="layoutMenu" class="layout-menu">
+  <div class="layout-head">Chart layouts</div>
+  <div class="layout-save">
+    <input id="layoutName" placeholder="layout name…" maxlength="24"
+           onkeydown="if(event.key==='Enter')saveLayout()">
+    <button onclick="saveLayout()">Save current</button>
+  </div>
+  <div id="layoutList" class="layout-list"></div>
+  <div class="layout-tip">Saves your indicators + timeframe. Click a name to apply.</div>
+</div>
 </body>
 </html>
