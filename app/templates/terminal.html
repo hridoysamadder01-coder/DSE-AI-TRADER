@@ -440,14 +440,14 @@ body.dragging-dock,body.dragging-dock *{cursor:ns-resize!important;user-select:n
 /* ========================================================================
    STATE + UTILS
    ======================================================================== */
-const LS={wl:"dse_watchlist",pf:"dse_portfolio",sym:"dse_current_symbol",ind:"dse_indicators",wlClosed:"dse_wl_closed",drawings:"dse_drawings_v2"};
+const LS={wl:"dse_watchlist",pf:"dse_portfolio",sym:"dse_current_symbol",ind:"dse_ind_v2",wlClosed:"dse_wl_closed",drawings:"dse_drawings_v2"};
 const state={
   watchlist:load(LS.wl,["DSEX","DS30","DSES","GP","SQURPHARMA","BEXIMCO"]),
   portfolio:load(LS.pf,[]),
   currentSymbol:load(LS.sym,"DSEX"),
   resolution:1440,hours:180000,    // default to full daily history (indices: ~13y)
   prices:{},
-  indicators:load(LS.ind,{ema:true,sma:true,vwap:true,bb:true,rsi:true,macd:true,ai:true}),
+  indicators:load(LS.ind,{ema:true,sma:true,vwap:false,bb:false,rsi:true,macd:true,ai:true}),
   wlCollapsed:load(LS.wlClosed,false),
   dock:null,                     // null = closed; or "research"/"smart"/...
   drawMode:null,                 // null | "trend" | "horizontal" | "fib"
@@ -563,11 +563,17 @@ let overlayHorizLines=[];     // series.priceLine handles for AI S/R + drawn hor
 let overlayZones=[];          // {fromTime,toTime,low,high,color,el} — SVG-rendered
 
 const baseOpts={
-  layout:{background:{color:"transparent"},textColor:"#b1bbe0",fontSize:11},
-  grid:{vertLines:{color:"#1d2855"},horzLines:{color:"#1d2855"}},
-  rightPriceScale:{borderColor:"#1d2855"},
-  timeScale:{borderColor:"#1d2855",timeVisible:true,secondsVisible:false},
-  crosshair:{mode:1},autoSize:true,
+  layout:{background:{color:"transparent"},textColor:"#b1bbe0",fontSize:11,
+    fontFamily:"'JetBrains Mono','SF Mono',Menlo,monospace"},
+  grid:{vertLines:{color:"rgba(29,40,85,.45)"},horzLines:{color:"rgba(29,40,85,.45)"}},
+  rightPriceScale:{borderColor:"#222c52",scaleMargins:{top:0.08,bottom:0.08},entireTextOnly:true},
+  timeScale:{borderColor:"#222c52",timeVisible:true,secondsVisible:false,rightOffset:6,barSpacing:8,minBarSpacing:2},
+  crosshair:{
+    mode:1,
+    vertLine:{color:"#4b598f",width:1,style:2,labelBackgroundColor:"#2a3566"},
+    horzLine:{color:"#4b598f",width:1,style:2,labelBackgroundColor:"#2a3566"},
+  },
+  autoSize:true,
 };
 
 let chartVolume;
@@ -575,10 +581,15 @@ let chartVolume;
 function initCharts(){
   // ===== MAIN price pane (candles + overlays only) =====
   chartMain=LightweightCharts.createChart(document.getElementById("paneMain"),baseOpts);
+  // Big faint symbol watermark behind the candles (TradingView signature look).
+  chartMain.applyOptions({watermark:{
+    visible:true,text:"DSEX",color:"rgba(120,140,210,.06)",
+    fontSize:64,fontStyle:"bold",horzAlign:"center",vertAlign:"center",
+  }});
   candleSeries=chartMain.addCandlestickSeries({
-    upColor:"#2fd49a",downColor:"#ff5560",
-    borderUpColor:"#2fd49a",borderDownColor:"#ff5560",
-    wickUpColor:"#2fd49a",wickDownColor:"#ff5560",
+    upColor:"#26c281",downColor:"#ef5350",
+    borderUpColor:"#26c281",borderDownColor:"#ef5350",
+    wickUpColor:"#5fe0ad",wickDownColor:"#ff7a82",
   });
   // Give the price scale a tiny bottom margin so the last candle isn't touching the time axis.
   chartMain.priceScale("right").applyOptions({scaleMargins:{top:0.06,bottom:0.06}});
@@ -662,6 +673,7 @@ function bb(values,period=20,stdMult=2){const m=sma(values,period);const up=[],l
 /* ---------- chart load ---------- */
 async function loadChartBuiltIn(symbol){
   document.getElementById("chartSym").textContent=symbol;
+  try{chartMain.applyOptions({watermark:{text:symbol}});}catch{}
   try{
     const data=await jget(`/api/chart/${encodeURIComponent(symbol)}/candles?resolution_min=${state.resolution}&hours=${state.hours}`);
     const bars=data.bars||[];
@@ -675,7 +687,7 @@ async function loadChartBuiltIn(symbol){
       return;
     }
     candleSeries.setData(bars.map(b=>({time:b.time,open:b.open,high:b.high,low:b.low,close:b.close})));
-    volumeSeries.setData(bars.map(b=>({time:b.time,value:b.volume||0,color:(b.close>=b.open)?"rgba(47,212,154,.55)":"rgba(255,85,96,.55)"})));
+    volumeSeries.setData(bars.map(b=>({time:b.time,value:b.volume||0,color:(b.close>=b.open)?"rgba(38,194,129,.5)":"rgba(239,83,80,.5)"})));
 
     const closes=bars.map(b=>b.close);
     const vols=bars.map(b=>b.volume||0);
@@ -713,7 +725,7 @@ async function loadChartBuiltIn(symbol){
     const m=macd(closes);
     macdLineSeries  .setData(state.indicators.macd?lineData(m.line):[]);
     macdSignalSeries.setData(state.indicators.macd?lineData(m.signal):[]);
-    macdHistSeries  .setData(state.indicators.macd?m.hist.map((v,i)=>v==null?null:({time:bars[i].time,value:v,color:v>=0?"rgba(47,212,154,.55)":"rgba(255,85,96,.55)"})).filter(Boolean):[]);
+    macdHistSeries  .setData(state.indicators.macd?m.hist.map((v,i)=>v==null?null:({time:bars[i].time,value:v,color:v>=0?"rgba(38,194,129,.55)":"rgba(239,83,80,.55)"})).filter(Boolean):[]);
 
     const last=bars[bars.length-1];
     document.getElementById("chartPrice").textContent=fmt(last.close);
@@ -725,10 +737,10 @@ async function loadChartBuiltIn(symbol){
     const dd = document.getElementById("dataDepth");
     if (dd) dd.textContent = `• ${bars.length} bars (${state.intel?.tick_count_24h ?? '—'} ticks/24h)`;
 
-    // Initial view: last ~150 bars (~7 months on 1D) — matches StockNow's default zoom
-    // so candles are wide enough to show actual OHLC bodies.
-    const showN = Math.min(150, bars.length);
-    chartMain.timeScale().setVisibleLogicalRange({ from: bars.length - showN, to: bars.length + 2 });
+    // Initial view: last ~110 bars so candles are wide and readable (like
+    // amarStock / StockNow), with a little empty space on the right.
+    const showN = Math.min(110, bars.length);
+    chartMain.timeScale().setVisibleLogicalRange({ from: bars.length - showN, to: bars.length + 6 });
     applyAiOverlays();
     redrawSvgOverlays();
   }catch(e){
