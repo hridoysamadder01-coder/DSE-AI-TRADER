@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from loguru import logger
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -159,6 +160,22 @@ def _append_live_index_bar(db: Session, index_name: str, bars: list[dict]) -> li
     return bars
 
 
+def _lazy_backfill_stock(db: Session, company: Company, days: int = 1825) -> None:
+    """On first chart view of a DSE stock with no stored history, scrape its
+    full daily OHLCV from day_end_archive and persist it. Cheap & one-off: after
+    the first load price_daily is populated so this won't re-trigger."""
+    if company.exchange != "DSE":
+        return
+    from ..collectors.dse_history import _upsert_daily, fetch_symbol_history
+
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=days)
+    rows = fetch_symbol_history(company.symbol, start, end)
+    if rows:
+        _upsert_daily(db, company.id, rows)
+        db.flush()
+
+
 @router.get("/{symbol}/candles")
 def candles(
     symbol: str,
@@ -182,6 +199,13 @@ def candles(
         bars = _daily_bars(db, company.id, days)
         if is_index:
             bars = _append_live_index_bar(db, sym, bars)
+        elif len(bars) < 30:
+            # Stock with no history yet — fetch it on demand, then re-read.
+            try:
+                _lazy_backfill_stock(db, company)
+                bars = _daily_bars(db, company.id, days)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"lazy backfill {sym} failed: {e}")
         source = "price_daily"
     elif is_index:
         bars = _index_intraday_bars(db, sym, hours, resolution_min)
